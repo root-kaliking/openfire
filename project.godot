@@ -1,5 +1,5 @@
 ; Engine configuration file.
-; OpenFire — cross-platform coop/deathmatch FPS (Godot 4.7)
+; OpenFire — cross-platform coop/deathmatch FPS (Godot 4.6)
 
 config_version=5
 
@@ -9,7 +9,7 @@ config/name="OpenFire"
 config/description="Cross-platform coop & deathmatch FPS with bots and configurable missions."
 config/version="0.2.30"
 run/main_scene="res://scenes/main_menu.tscn"
-config/features=PackedStringArray("4.7", "Forward Plus")
+config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
 [autoload]

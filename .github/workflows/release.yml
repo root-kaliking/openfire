@@ -16,7 +16,7 @@ permissions:
   contents: write          # push the bump commit + tag and create the release
 
 env:
-  GODOT_VERSION: 4.7.1     # Godot 4.7 stable line (4.7.1.stable.official maintenance release)
+  GODOT_VERSION: 4.6.3     # matches .tools/godot (4.6.3.stable.official)
   GODOT_RELEASE: stable
 
 jobs:
