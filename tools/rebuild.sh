@@ -37,4 +37,11 @@ mkdir -p build
 "$GODOT" --headless --path . --export-release "Linux"   build/openfire.x86_64 >/dev/null 2>&1
 "$GODOT" --headless --path . --export-release "Windows" build/openfire.exe     >/dev/null 2>&1
 "$GODOT" --headless --path . --export-release "macOS"   build/openfire.zip     >/dev/null 2>&1
-echo "rebuild: built OpenFire v$NEW (linux/windows/macos)"
+# Android build only if ANDROID_HOME is set (has JDK + SDK + debug keystore)
+if [ -n "${ANDROID_HOME:-}" ] && command -v keytool >/dev/null 2>&1; then
+	"$GODOT" --headless --path . --export-release "Android" build/openfire.apk >/dev/null 2>&1 \
+		&& ANDROID_BUILT=" android" || ANDROID_BUILT=""
+else
+	ANDROID_BUILT=""
+fi
+echo "rebuild: built OpenFire v$NEW (linux/windows/macos${ANDROID_BUILT})"
