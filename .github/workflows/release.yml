@@ -11,6 +11,11 @@ on:
         type: choice
         default: patch
         options: [patch, minor, major]
+  # 新增：推送/PR自动触发基础检查（仅跑校验，不会执行打包发布逻辑）
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 permissions:
   contents: write          # push the bump commit + tag and create the release
@@ -22,6 +27,8 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # 关键：只有手动点击流水线才执行完整发布打包，push/PR只会跳过此job，不会打包、改版本、打tag
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -138,3 +145,33 @@ jobs:
           name: OpenFire v${{ steps.bump.outputs.version }}
           generate_release_notes: true
           files: dist/*
+
+  # 新增job：push/PR自动执行的分支构建检查（仅导入资源+冒烟测试，不打包、不改版本、不发Release）
+  check:
+    runs-on: ubuntu-latest
+    # 仅推送/PR触发，手动发布时跳过此job
+    if: github.event_name != 'workflow_dispatch'
+    env:
+      GODOT_VERSION: 4.7.1
+      GODOT_RELEASE: stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Godot Headless
+        run: |
+          set -euo pipefail
+          base="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-${GODOT_RELEASE}"
+          curl -fL -o godot.zip "$base/Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+          godot --version
+
+      - name: Import all game assets
+        run: godot --headless --path . --import
+
+      - name: Smoke test validation
+        run: |
+          set -uo pipefail
+          godot --headless --path . tests/smoke.tscn 2>&1 | tee smoke.log
+          grep -q "SMOKE: DONE ok=true" smoke.log
