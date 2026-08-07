@@ -1,8 +1,7 @@
 name: Build & Release
 
-# Manual "bump then release": click Run workflow, pick a bump level. The job bumps
-# project.godot's version, runs the smoke test, exports Linux/Windows/macOS, commits
-# the bump + tag, and publishes a GitHub Release with the packaged builds attached.
+# 手动触发：bump 版本 + 冒烟测试 + 导出全部产物（客户端 + 专用服务器 + 中央服务器）+ 发布 GitHub Release
+# push/PR 触发：冒烟测试 + 导出全部产物 + 上传为 workflow artifact（方便下载测试，不发 Release）
 on:
   workflow_dispatch:
     inputs:
@@ -11,23 +10,24 @@ on:
         type: choice
         default: patch
         options: [patch, minor, major]
-  # 新增：推送/PR自动触发基础检查（仅跑校验，不会执行打包发布逻辑）
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
 
 permissions:
-  contents: write          # push the bump commit + tag and create the release
+  contents: write          # release job 需要 push bump commit + tag + create release
 
 env:
-  GODOT_VERSION: 4.7.1     # Godot 4.7 stable line (4.7.1.stable.official maintenance release)
+  GODOT_VERSION: 4.7.1
   GODOT_RELEASE: stable
 
 jobs:
+  # ===========================================================================
+  # release：手动触发，完整发布流程（bump + 构建 + GitHub Release）
+  # ===========================================================================
   release:
     runs-on: ubuntu-latest
-    # 关键：只有手动点击流水线才执行完整发布打包，push/PR只会跳过此job，不会打包、改版本、打tag
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
@@ -43,11 +43,16 @@ jobs:
           sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
           sudo chmod +x /usr/local/bin/godot
           curl -fL -o templates.tpz "$base/Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_export_templates.tpz"
-          unzip -q templates.tpz                       # -> ./templates/
+          unzip -q templates.tpz
           dest="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
           mkdir -p "$dest"
           mv templates/* "$dest/"
           godot --version
+
+      - name: Setup Go (for central server build)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
 
       - name: Setup JDK 17 + Android SDK (for APK build)
         uses: actions/setup-java@v4
@@ -58,27 +63,20 @@ jobs:
       - name: Install Android commandline tools + SDK
         run: |
           set -euo pipefail
-          # Android SDK location (matches Godot's default lookup)
           export ANDROID_HOME="$HOME/android-sdk"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          # GITHUB_PATH only applies to *subsequent* steps, so also export PATH
-          # here so sdkmanager is usable within this same step.
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
           mkdir -p "$ANDROID_HOME/cmdline-tools"
           cd "$ANDROID_HOME/cmdline-tools"
-          # Download Android command-line tools (latest as of 2025; pinned hash for reproducibility)
           curl -fL -o cmdline-tools.zip \
             "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
           unzip -q cmdline-tools.zip
           mv cmdline-tools latest
-          # Accept licenses and install required SDK packages.
-          # Redirect yes's stderr too, to silence the harmless "Broken pipe"
-          # warning that appears when sdkmanager closes the pipe early.
           yes 2>/dev/null | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install \
             "platform-tools" \
@@ -90,7 +88,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.android"
-          # Standard Android debug keystore (password: android, alias: androiddebugkey)
           if [ ! -f "$HOME/.android/debug.keystore" ]; then
             keytool -genkeypair -v \
               -keystore "$HOME/.android/debug.keystore" \
@@ -104,10 +101,6 @@ jobs:
           fi
           ls -lh "$HOME/.android/debug.keystore"
 
-      # The NobodyWho GDExtension native libs are gitignored. Set a repo Actions
-      # variable NOBODYWHO_URL (Settings -> Secrets and variables -> Actions ->
-      # Variables) to a zip of the addon libs to ship the embedded LLM in releases.
-      # Without it the build still works — Survival story generation just falls back.
       - name: Restore NobodyWho addon (optional)
         continue-on-error: true
         env:
@@ -116,8 +109,6 @@ jobs:
           set -uo pipefail
           if [ -n "${NOBODYWHO_URL:-}" ]; then
             curl -fL -o nw.zip "$NOBODYWHO_URL" && mkdir -p nw_extract && unzip -o -q nw.zip -d nw_extract
-            # Copy ONLY the desktop release libs the manifest references (the zip also
-            # contains huge debug/android/ios libs we must not ship).
             for lib in \
               libnobodywho-godot-x86_64-unknown-linux-gnu-release.so \
               libnobodywho-godot-x86_64-pc-windows-msvc-release.dll \
@@ -127,8 +118,6 @@ jobs:
               [ -n "$found" ] && cp "$found" addons/nobodywho/
             done
           fi
-          # If no native libs are present, drop the .gdextension manifest so Godot
-          # doesn't error trying to load a missing library (the LLM just falls back).
           if ! ls addons/nobodywho/*.so addons/nobodywho/*.dll addons/nobodywho/*.dylib >/dev/null 2>&1; then
             echo "::warning::No NobodyWho libs — building without the embedded LLM (set NOBODYWHO_URL to include it)."
             rm -f addons/nobodywho/nobodywho.gdextension addons/nobodywho/nobodywho.gdextension.uid
@@ -152,34 +141,55 @@ jobs:
           godot --headless --path . tests/smoke.tscn 2>&1 | tee smoke.log
           grep -q "SMOKE: DONE ok=true" smoke.log
 
-      - name: Export builds
+      - name: Export all builds (clients + dedicated server + central server)
         run: |
           set -euo pipefail
           mkdir -p build dist
+          V="${{ steps.bump.outputs.version }}"
+
+          # --- 客户端构建 ---
           godot --headless --path . --export-release "Linux"   build/openfire.x86_64
           godot --headless --path . --export-release "Windows" build/openfire.exe
           godot --headless --path . --export-release "macOS"   build/openfire-macos.zip
           godot --headless --path . --export-release "Android" build/openfire.apk
-          V="${{ steps.bump.outputs.version }}"
-          # Linux: ship the executable + the LLM lib (if present) so the embedded
-          # model works; the .pck is embedded in the binary by the preset.
+
+          # --- 专用游戏服务器（Dedicated Server，Linux x86_64）---
+          godot --headless --path . --export-release "Dedicated Server" build/openfire-server
+          chmod +x build/openfire-server
+
+          # --- Go 中央服务器（Linux x86_64）---
+          cd server && go mod tidy && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../build/openfire-central ./cmd/server && cd ..
+
+          # --- 打包到 dist/ ---
           cp -f addons/nobodywho/*.so build/ 2>/dev/null || true
+
+          # Linux 客户端（含 LLM 库若有）
           ( cd build && zip -j "../dist/openfire-${V}-linux-x86_64.zip" openfire.x86_64 libnobodywho-*.so 2>/dev/null \
               || zip -j "../dist/openfire-${V}-linux-x86_64.zip" openfire.x86_64 )
+          # Windows 客户端
           ( cd build && zip -j "../dist/openfire-${V}-windows-x64.zip"  openfire.exe libnobodywho-*.dll 2>/dev/null \
               || zip -j "../dist/openfire-${V}-windows-x64.zip"  openfire.exe )
-          # macOS export is already a zipped .app.
+          # macOS 客户端
           cp build/openfire-macos.zip "dist/openfire-${V}-macos.zip"
-          # Android APK: arm64-v8a debug-signed build
+          # Android APK
           cp build/openfire.apk "dist/openfire-${V}-android-arm64-v8a.apk"
-          echo "Artifacts:"; ls -lh dist
+
+          # 专用游戏服务器（Linux）
+          ( cd build && zip -j "../dist/openfire-${V}-dedicated-server-linux-x86_64.zip" openfire-server )
+
+          # Go 中央服务器（Linux，含迁移脚本）
+          mkdir -p central-pkg/server/migrations
+          cp build/openfire-central central-pkg/
+          cp server/.env.example central-pkg/server/
+          cp server/migrations/001_init.sql central-pkg/server/migrations/
+          cp server/README.md central-pkg/server/
+          ( cd central-pkg && zip -r "../dist/openfire-${V}-central-server-linux-x86_64.zip" . )
+
+          echo "=== All artifacts ==="; ls -lh dist
 
       - name: Build ComfyUI bundle (auto-install asset)
         run: |
           set -euo pipefail
-          # ComfyUI source + cross-platform launchers; the game auto-downloads this on first
-          # launch (Settings.comfyui_bundle_url -> releases/latest/download/comfyui-bundle.zip)
-          # and installs PyTorch on first run. Stable filename so the "latest" URL is durable.
           bash tools/make_comfyui_bundle.sh
           cp build/comfyui-bundle.zip dist/comfyui-bundle.zip
           ls -lh dist/comfyui-bundle.zip
@@ -204,18 +214,16 @@ jobs:
           generate_release_notes: true
           files: dist/*
 
-  # 新增job：push/PR自动执行的分支构建检查（仅导入资源+冒烟测试，不打包、不改版本、不发Release）
+  # ===========================================================================
+  # check：push/PR 触发，构建全部产物并上传为 artifact 供下载测试（不发 Release）
+  # ===========================================================================
   check:
     runs-on: ubuntu-latest
-    # 仅推送/PR触发，手动发布时跳过此job
     if: github.event_name != 'workflow_dispatch'
-    env:
-      GODOT_VERSION: 4.7.1
-      GODOT_RELEASE: stable
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Godot Headless
+      - name: Install Godot ${{ env.GODOT_VERSION }} + export templates
         run: |
           set -euo pipefail
           base="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-${GODOT_RELEASE}"
@@ -223,12 +231,81 @@ jobs:
           unzip -q godot.zip
           sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
           sudo chmod +x /usr/local/bin/godot
+          curl -fL -o templates.tpz "$base/Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_export_templates.tpz"
+          unzip -q templates.tpz
+          dest="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
+          mkdir -p "$dest"
+          mv templates/* "$dest/"
           godot --version
 
-      - name: Remove NobodyWho addon if no native libs (CI fallback)
+      - name: Setup Go (for central server build)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup JDK 17 + Android SDK (for APK build)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android commandline tools + SDK
         run: |
-          # The .so/.dll/.dylib are gitignored; if NOBODYWHO_URL isn't set
-          # (release job sets it), drop the manifest so Godot doesn't error.
+          set -euo pipefail
+          export ANDROID_HOME="$HOME/android-sdk"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          cd "$ANDROID_HOME/cmdline-tools"
+          curl -fL -o cmdline-tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q cmdline-tools.zip
+          mv cmdline-tools latest
+          yes 2>/dev/null | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "cmdline-tools;latest"
+
+      - name: Generate Android debug keystore
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Restore NobodyWho addon (optional)
+        continue-on-error: true
+        env:
+          NOBODYWHO_URL: ${{ vars.NOBODYWHO_URL }}
+        run: |
+          set -uo pipefail
+          if [ -n "${NOBODYWHO_URL:-}" ]; then
+            curl -fL -o nw.zip "$NOBODYWHO_URL" && mkdir -p nw_extract && unzip -o -q nw.zip -d nw_extract
+            for lib in \
+              libnobodywho-godot-x86_64-unknown-linux-gnu-release.so \
+              libnobodywho-godot-x86_64-pc-windows-msvc-release.dll \
+              libnobodywho-godot-x86_64-apple-darwin-release.dylib \
+              libnobodywho-godot-aarch64-apple-darwin-release.dylib; do
+              found=$(find nw_extract -name "$lib" | head -1)
+              [ -n "$found" ] && cp "$found" addons/nobodywho/
+            done
+          fi
           if ! ls addons/nobodywho/*.so addons/nobodywho/*.dll addons/nobodywho/*.dylib >/dev/null 2>&1; then
             echo "::warning::No NobodyWho libs — removing .gdextension manifest for CI check."
             rm -f addons/nobodywho/nobodywho.gdextension addons/nobodywho/nobodywho.gdextension.uid
@@ -244,3 +321,51 @@ jobs:
           set -uo pipefail
           godot --headless --path . tests/smoke.tscn 2>&1 | tee smoke.log
           grep -q "SMOKE: DONE ok=true" smoke.log
+
+      - name: Export all builds (clients + dedicated server + central server)
+        run: |
+          set -euo pipefail
+          mkdir -p build dist
+
+          # --- 客户端构建 ---
+          godot --headless --path . --export-release "Linux"   build/openfire.x86_64
+          godot --headless --path . --export-release "Windows" build/openfire.exe
+          godot --headless --path . --export-release "macOS"   build/openfire-macos.zip
+          godot --headless --path . --export-release "Android" build/openfire.apk
+
+          # --- 专用游戏服务器（Dedicated Server，Linux x86_64）---
+          godot --headless --path . --export-release "Dedicated Server" build/openfire-server
+          chmod +x build/openfire-server
+
+          # --- Go 中央服务器（Linux x86_64）---
+          cd server && go mod tidy && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../build/openfire-central ./cmd/server && cd ..
+
+          # --- 打包到 dist/ ---
+          cp -f addons/nobodywho/*.so build/ 2>/dev/null || true
+
+          ( cd build && zip -j "../dist/openfire-linux-x86_64.zip" openfire.x86_64 libnobodywho-*.so 2>/dev/null \
+              || zip -j "../dist/openfire-linux-x86_64.zip" openfire.x86_64 )
+          ( cd build && zip -j "../dist/openfire-windows-x64.zip"  openfire.exe libnobodywho-*.dll 2>/dev/null \
+              || zip -j "../dist/openfire-windows-x64.zip"  openfire.exe )
+          cp build/openfire-macos.zip "dist/openfire-macos.zip"
+          cp build/openfire.apk "dist/openfire-android-arm64-v8a.apk"
+
+          # 专用游戏服务器（Linux）
+          ( cd build && zip -j "../dist/openfire-dedicated-server-linux-x86_64.zip" openfire-server )
+
+          # Go 中央服务器（Linux，含迁移脚本）
+          mkdir -p central-pkg/server/migrations
+          cp build/openfire-central central-pkg/
+          cp server/.env.example central-pkg/server/
+          cp server/migrations/001_init.sql central-pkg/server/migrations/
+          cp server/README.md central-pkg/server/
+          ( cd central-pkg && zip -r "../dist/openfire-central-server-linux-x86_64.zip" . )
+
+          echo "=== All artifacts ==="; ls -lh dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openfire-builds-${{ github.sha }}
+          path: dist/*
+          retention-days: 14
