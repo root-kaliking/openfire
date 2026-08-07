@@ -225,6 +225,17 @@ jobs:
           sudo chmod +x /usr/local/bin/godot
           godot --version
 
+      - name: Remove NobodyWho addon if no native libs (CI fallback)
+        run: |
+          # The .so/.dll/.dylib are gitignored; if NOBODYWHO_URL isn't set
+          # (release job sets it), drop the manifest so Godot doesn't error.
+          if ! ls addons/nobodywho/*.so addons/nobodywho/*.dll addons/nobodywho/*.dylib >/dev/null 2>&1; then
+            echo "::warning::No NobodyWho libs — removing .gdextension manifest for CI check."
+            rm -f addons/nobodywho/nobodywho.gdextension addons/nobodywho/nobodywho.gdextension.uid
+          else
+            echo "Embedded LLM libs present:"; ls -1 addons/nobodywho/ | grep -E '\.(so|dll|dylib)$'
+          fi
+
       - name: Import all game assets
         run: godot --headless --path . --import
 
