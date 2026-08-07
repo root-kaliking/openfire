@@ -101,22 +101,34 @@ jobs:
           fi
           ls -lh "$HOME/.android/debug.keystore"
 
-      - name: Configure Android export for CI (prebuilt APK template)
+      - name: Configure Android export for CI (prebuilt APK template + debug-signed)
         run: |
           set -euo pipefail
-          # gradle_build=true requires android/build/ + version marker installed by Editor.
-          # In CI we switch to prebuilt APK template mode: zero-config, ships straight
-          # from the export templates tpz, no Gradle wrapper runs.
+          # 1) gradle_build=true requires android/build/ + version marker installed by Editor.
+          #    In CI we switch to prebuilt APK template mode: zero-config, ships straight
+          #    from the export templates tpz, no Gradle wrapper runs.
+          # 2) The preset ships with empty release keystore; release export then fails at
+          #    signing. CI-generated debug keystore is used for release signing too (good
+          #    enough for test artifacts; production release uses a real release keystore).
           python3 - <<'PY'
-          import pathlib
+          import pathlib, os
+          home = os.path.expanduser("~")
+          debug_ks = f"{home}/.android/debug.keystore"
           p = pathlib.Path("export_presets.cfg")
           t = p.read_text()
           t = t.replace('gradle_build/use_gradle_build=true',
                         'gradle_build/use_gradle_build=false')
+          t = t.replace('keystore/release=""',
+                        f'keystore/release="{debug_ks}"')
+          t = t.replace('keystore/release_user=""',
+                        'keystore/release_user="androiddebugkey"')
+          t = t.replace('keystore/release_password=""',
+                        'keystore/release_password="android"')
           p.write_text(t)
           print("-> gradle_build/use_gradle_build=false")
+          print(f"-> keystore/release={debug_ks}")
           PY
-          grep 'gradle_build/use_gradle_build' export_presets.cfg
+          grep -E 'gradle_build/use_gradle_build|keystore/release' export_presets.cfg
 
       - name: Restore NobodyWho addon (optional)
         continue-on-error: true
@@ -306,22 +318,34 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Configure Android export for CI (prebuilt APK template)
+      - name: Configure Android export for CI (prebuilt APK template + debug-signed)
         run: |
           set -euo pipefail
-          # gradle_build=true requires android/build/ + version marker installed by Editor.
-          # In CI we switch to prebuilt APK template mode: zero-config, ships straight
-          # from the export templates tpz, no Gradle wrapper runs.
+          # 1) gradle_build=true requires android/build/ + version marker installed by Editor.
+          #    In CI we switch to prebuilt APK template mode: zero-config, ships straight
+          #    from the export templates tpz, no Gradle wrapper runs.
+          # 2) The preset ships with empty release keystore; release export then fails at
+          #    signing. CI-generated debug keystore is used for release signing too (good
+          #    enough for test artifacts; production release uses a real release keystore).
           python3 - <<'PY'
-          import pathlib
+          import pathlib, os
+          home = os.path.expanduser("~")
+          debug_ks = f"{home}/.android/debug.keystore"
           p = pathlib.Path("export_presets.cfg")
           t = p.read_text()
           t = t.replace('gradle_build/use_gradle_build=true',
                         'gradle_build/use_gradle_build=false')
+          t = t.replace('keystore/release=""',
+                        f'keystore/release="{debug_ks}"')
+          t = t.replace('keystore/release_user=""',
+                        'keystore/release_user="androiddebugkey"')
+          t = t.replace('keystore/release_password=""',
+                        'keystore/release_password="android"')
           p.write_text(t)
           print("-> gradle_build/use_gradle_build=false")
+          print(f"-> keystore/release={debug_ks}")
           PY
-          grep 'gradle_build/use_gradle_build' export_presets.cfg
+          grep -E 'gradle_build/use_gradle_build|keystore/release' export_presets.cfg
 
       - name: Restore NobodyWho addon (optional)
         continue-on-error: true
