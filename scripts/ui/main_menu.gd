@@ -70,6 +70,29 @@ const MAP_PRESETS := [
 @onready var create_panel: Control = %CreatePanel
 @onready var char_list: VBoxContainer = %CharList
 
+# --- online (central server) UI ----------------------------------------------
+# Online-panel widgets are built in code so the .tscn stays untouched.
+var _online_match: bool = false        # true between match_found and scene switch / failure
+var _queuing: bool = false             # true while waiting for match_found (toggles PLAY ONLINE)
+var _pending_queue: bool = false       # user clicked PLAY ONLINE before the lobby connected
+var _history_http: HTTPRequest = null
+var _setup_vbox: VBoxContainer = null
+var _auth_row: Control = null
+var _username_edit: LineEdit = null
+var _password_edit: LineEdit = null
+var _login_btn: Button = null
+var _register_btn: Button = null
+var _auth_status: Label = null
+var _logged_in_row: Control = null
+var _logged_in_label: Label = null
+var _logout_btn: Button = null
+var _play_online_btn: Button = null
+var _history_btn: Button = null
+var _match_status: Label = null
+var _history_panel: Control = null
+var _history_status: Label = null
+var _history_list: VBoxContainer = null
+
 # Selectable inventory keys for Adventure (label + keycode).
 const INV_KEYS := [
 	{ "name": "Tab", "code": KEY_TAB },
@@ -110,6 +133,30 @@ func _ready() -> void:
 	Net.connection_failed.connect(_on_failed)
 	Net.server_disconnected.connect(_on_server_disconnected)
 	Net.match_started.connect(_on_match_started)
+
+	# --- online (central server) wiring ---
+	Auth.logged_in.connect(_on_auth_logged_in)
+	Auth.logged_out.connect(_on_auth_logged_out)
+	Auth.login_failed.connect(_on_auth_login_failed)
+	Lobby.connected.connect(_on_lobby_connected)
+	Lobby.disconnected.connect(_on_lobby_disconnected)
+	Lobby.queued.connect(_on_lobby_queued)
+	Lobby.match_found.connect(_on_lobby_match_found)
+	Lobby.match_canceled.connect(_on_lobby_match_canceled)
+	Lobby.ws_error.connect(_on_lobby_ws_error)
+	# BootChecker redirects dedicated servers before the menu loads; connect defensively
+	# (the stub doesn't define the signal yet) and guard the menu if we're not a client.
+	if BootChecker.has_signal("boot_done"):
+		BootChecker.boot_done.connect(_on_boot_done)
+	_history_http = HTTPRequest.new()
+	add_child(_history_http)
+	_build_online_panel()
+	_build_history_panel()
+	_refresh_auth_ui()
+	# Auto-attach the lobby WebSocket if we have a saved session, so the player can
+	# queue the moment they click PLAY ONLINE.
+	if Auth.is_logged_in() and not Lobby.is_connected():
+		Lobby.connect_lobby()
 
 	name_edit.text = Game.player_name
 	%VersionLabel.text = "v" + str(ProjectSettings.get_setting("application/config/version", "0.0.0"))
@@ -507,14 +554,30 @@ func _on_back() -> void:
 # ---------------------------------------------------------------- net callbacks
 
 func _on_connected() -> void:
+	if _online_match:
+		# Connected to a dedicated game server via matchmaking — don't show the custom
+		# lobby panel; just wait for the GS to start the match.
+		status_label.text = "Connected to game server, waiting for match to start…"
+		_match_status.text = "已连接游戏服务器,等待对局开始..."
+		return
 	status_label.text = "Connected. Waiting for host to start…"
 	_show_lobby()
 
 func _on_failed() -> void:
+	if _online_match:
+		_online_match = false
+		_play_online_btn.disabled = not Auth.is_logged_in()
+		_match_status.text = "连接游戏服务器失败"
+		_match_status.modulate = Color(1, 0.6, 0.6)
 	status_label.text = "Connection failed."
 	_show_setup()
 
 func _on_server_disconnected() -> void:
+	if _online_match:
+		_online_match = false
+		_play_online_btn.disabled = not Auth.is_logged_in()
+		_match_status.text = "与游戏服务器断开"
+		_match_status.modulate = Color(1, 0.6, 0.6)
 	status_label.text = "Disconnected from host."
 	_show_setup()
 
@@ -654,3 +717,345 @@ func _skill_name(v: float) -> String:
 		if abs(s["value"] - v) < 0.01:
 			return s["name"]
 	return "Custom"
+
+# ---------------------------------------------------------------- online (central server)
+
+## Build the account + online-play panel and slot it at the top of the setup VBox,
+## above the custom-game rows. Built in code so the .tscn doesn't have to change.
+func _build_online_panel() -> void:
+	_setup_vbox = setup_panel.get_node("Center/Box/VBox")
+	var panel := PanelContainer.new()
+	panel.name = "OnlinePanel"
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 6)
+	panel.add_child(vbox)
+	var header := Label.new()
+	header.text = "在线对战 · Online Matchmaking"
+	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	header.modulate = Color(1, 0.85, 0.4)
+	vbox.add_child(header)
+	# Auth row (visible when logged out).
+	_auth_row = HBoxContainer.new()
+	_auth_row.add_theme_constant_override("separation", 6)
+	var al := Label.new()
+	al.text = "账号"
+	al.custom_minimum_size = Vector2(48, 0)
+	_auth_row.add_child(al)
+	_username_edit = LineEdit.new()
+	_username_edit.placeholder_text = "用户名"
+	_username_edit.custom_minimum_size = Vector2(140, 0)
+	_auth_row.add_child(_username_edit)
+	_password_edit = LineEdit.new()
+	_password_edit.placeholder_text = "密码"
+	_password_edit.secret = true
+	_password_edit.custom_minimum_size = Vector2(140, 0)
+	_password_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_auth_row.add_child(_password_edit)
+	_login_btn = Button.new()
+	_login_btn.text = "登录"
+	_auth_row.add_child(_login_btn)
+	_register_btn = Button.new()
+	_register_btn.text = "注册"
+	_auth_row.add_child(_register_btn)
+	vbox.add_child(_auth_row)
+	_auth_status = Label.new()
+	_auth_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_auth_status.modulate = Color(1, 0.6, 0.6)
+	_auth_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_auth_status.custom_minimum_size = Vector2(360, 0)
+	vbox.add_child(_auth_status)
+	# Logged-in row (visible when logged in).
+	_logged_in_row = HBoxContainer.new()
+	_logged_in_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	_logged_in_row.add_theme_constant_override("separation", 8)
+	_logged_in_label = Label.new()
+	_logged_in_label.custom_minimum_size = Vector2(220, 0)
+	_logged_in_row.add_child(_logged_in_label)
+	_logout_btn = Button.new()
+	_logout_btn.text = "退出登录"
+	_logged_in_row.add_child(_logout_btn)
+	vbox.add_child(_logged_in_row)
+	# Online buttons.
+	var btn_row := HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 8)
+	_play_online_btn = Button.new()
+	_play_online_btn.text = "在线对战"
+	_play_online_btn.custom_minimum_size = Vector2(200, 0)
+	btn_row.add_child(_play_online_btn)
+	_history_btn = Button.new()
+	_history_btn.text = "历史战绩"
+	btn_row.add_child(_history_btn)
+	vbox.add_child(btn_row)
+	_match_status = Label.new()
+	_match_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_match_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_match_status.custom_minimum_size = Vector2(360, 0)
+	_match_status.modulate = Color(0.7, 0.85, 1.0)
+	vbox.add_child(_match_status)
+	vbox.add_child(HSeparator.new())
+	_setup_vbox.add_child(panel)
+	_setup_vbox.move_child(panel, 2)   # after Title + Subtitle, above the custom rows
+	_login_btn.pressed.connect(_on_login_pressed)
+	_register_btn.pressed.connect(_on_register_pressed)
+	_logout_btn.pressed.connect(_on_logout_pressed)
+	_play_online_btn.pressed.connect(_on_play_online)
+	_history_btn.pressed.connect(_on_show_history)
+	_password_edit.text_submitted.connect(func(_s): _on_login_pressed())
+
+## Full-screen overlay listing the player's recent matches (GET /api/matches).
+func _build_history_panel() -> void:
+	_history_panel = Control.new()
+	_history_panel.name = "HistoryPanel"
+	_history_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_history_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_history_panel.visible = false
+	var dim := ColorRect.new()
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color(0, 0, 0, 0.6)
+	_history_panel.add_child(dim)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_history_panel.add_child(center)
+	var box := PanelContainer.new()
+	center.add_child(box)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	vbox.custom_minimum_size = Vector2(560, 0)
+	box.add_child(vbox)
+	var title := Label.new()
+	title.text = "历史战绩 · Recent Matches"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(title)
+	_history_status = Label.new()
+	_history_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_history_status.modulate = Color(1, 1, 1, 0.6)
+	vbox.add_child(_history_status)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 320)
+	vbox.add_child(scroll)
+	_history_list = VBoxContainer.new()
+	_history_list.add_theme_constant_override("separation", 4)
+	_history_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_history_list)
+	var close := Button.new()
+	close.text = "关闭"
+	vbox.add_child(close)
+	close.pressed.connect(func(): _history_panel.visible = false)
+	add_child(_history_panel)
+
+## Toggle auth-row vs logged-in-row and the PLAY ONLINE / history buttons.
+func _refresh_auth_ui() -> void:
+	var logged := Auth.is_logged_in()
+	_auth_row.visible = not logged
+	_auth_status.text = ""
+	_logged_in_row.visible = logged
+	if logged:
+		_logged_in_label.text = "已登录: %s" % Auth.get_username()
+	_play_online_btn.disabled = not logged
+	_history_btn.disabled = not logged
+	if not logged:
+		_queuing = false
+		_pending_queue = false
+		_play_online_btn.text = "在线对战"
+		_match_status.text = ""
+
+func _on_login_pressed() -> void:
+	var u := _username_edit.text.strip_edges()
+	var p := _password_edit.text
+	if u == "" or p == "":
+		_auth_status.text = "用户名和密码不能为空"
+		return
+	_auth_status.text = "登录中…"
+	_login_btn.disabled = true
+	_register_btn.disabled = true
+	Auth.login(u, p)
+	_password_edit.text = ""
+
+func _on_register_pressed() -> void:
+	var u := _username_edit.text.strip_edges()
+	var p := _password_edit.text
+	if u == "" or p == "":
+		_auth_status.text = "用户名和密码不能为空"
+		return
+	_auth_status.text = "注册中…"
+	_login_btn.disabled = true
+	_register_btn.disabled = true
+	Auth.register(u, p)
+	_password_edit.text = ""
+
+func _on_logout_pressed() -> void:
+	if Lobby.is_connected():
+		Lobby.disconnect_lobby()
+	Auth.logout()
+
+func _on_auth_logged_in(_user_id: String, _username: String) -> void:
+	_login_btn.disabled = false
+	_register_btn.disabled = false
+	_refresh_auth_ui()
+	if not Lobby.is_connected():
+		Lobby.connect_lobby()
+
+func _on_auth_logged_out() -> void:
+	_refresh_auth_ui()
+
+func _on_auth_login_failed(reason: String) -> void:
+	_login_btn.disabled = false
+	_register_btn.disabled = false
+	var msg := reason
+	match reason:
+		"network": msg = "网络错误,请稍后重试"
+		"credentials": msg = "用户名或密码错误"
+		"taken": msg = "用户名已被占用"
+		"empty": msg = "用户名和密码不能为空"
+		"busy": msg = "请稍候(请求进行中)"
+		_: msg = "登录失败: %s" % reason
+	_auth_status.text = msg
+
+func _on_lobby_connected() -> void:
+	_match_status.text = "已连接大厅"
+	_match_status.modulate = Color(0.6, 1.0, 0.6)
+	if _pending_queue:
+		_pending_queue = false
+		_do_queue()
+
+func _on_lobby_disconnected(reason: String) -> void:
+	_queuing = false
+	_pending_queue = false
+	_play_online_btn.text = "在线对战"
+	_match_status.text = "大厅已断开: %s" % reason
+	_match_status.modulate = Color(1, 0.6, 0.6)
+
+func _on_lobby_queued() -> void:
+	_queuing = true
+	_play_online_btn.text = "匹配中…(点击取消)"
+	_match_status.text = "已入队,正在寻找对局…"
+	_match_status.modulate = Color(0.7, 0.85, 1.0)
+
+func _on_lobby_match_canceled() -> void:
+	_queuing = false
+	_play_online_btn.text = "在线对战"
+	_match_status.text = "已取消匹配"
+
+func _on_lobby_ws_error(message: String) -> void:
+	_match_status.text = "错误: %s" % message
+	_match_status.modulate = Color(1, 0.6, 0.6)
+
+func _on_lobby_match_found(match_id: String, gs_host: String, gs_port: int, players: Array, mode: String) -> void:
+	_queuing = false
+	_play_online_btn.text = "在线对战"
+	_play_online_btn.disabled = true
+	_online_match = true
+	# The GS identifies us by the match roster, but the ENet name registration still
+	# sends Game.player_name — keep them in sync.
+	Game.player_name = Auth.get_username()
+	var n := players.size()
+	_match_status.text = "找到对局!连接到游戏服务器 %s:%d(%d 玩家 · %s)…" % [gs_host, gs_port, n, mode]
+	_match_status.modulate = Color(0.6, 1.0, 0.6)
+	if not Net.join_game(gs_host, gs_port):
+		_online_match = false
+		_play_online_btn.disabled = not Auth.is_logged_in()
+		_match_status.text = "无法启动客户端连接"
+		_match_status.modulate = Color(1, 0.6, 0.6)
+
+## PLAY ONLINE button: queue / cancel / auto-queue-once-connected.
+func _on_play_online() -> void:
+	if not Auth.is_logged_in():
+		_auth_status.text = "请先登录"
+		return
+	if _online_match:
+		return   # already connecting to a GS
+	if _queuing:
+		Lobby.cancel_match()
+		return
+	if not Lobby.is_connected():
+		_pending_queue = true
+		_match_status.text = "正在连接大厅…"
+		_match_status.modulate = Color(0.7, 0.85, 1.0)
+		Lobby.connect_lobby()
+		return
+	_do_queue()
+
+func _do_queue() -> void:
+	Lobby.queue_match(_selected_online_mode())
+	_match_status.text = "正在入队…"
+	_match_status.modulate = Color(0.7, 0.85, 1.0)
+
+## Map the main mode dropdown to a backend match mode string. Adventure and Co-op
+## aren't matchmade, so fall back to deathmatch for those.
+func _selected_online_mode() -> String:
+	match mode_option.selected:
+		Game.Mode.DEATHMATCH: return "deathmatch"
+		Game.Mode.TEAM_DEATHMATCH: return "team_deathmatch"
+		Game.Mode.DOMINATION: return "domination"
+		Game.Mode.BATTLE_ROYALE: return "battle_royale"
+		_: return "deathmatch"
+
+## BootChecker guard: in CLIENT mode (0) the menu runs normally; any other mode
+## (e.g. DEDICATED_SERVER, which should have redirected already) disables online.
+## The int comparison assumes the enum is ordered CLIENT=0, DEDICATED_SERVER=1 —
+## adjust if subagent B defines it differently.
+func _on_boot_done(mode: int) -> void:
+	if mode != 0:
+		_play_online_btn.disabled = true
+		_match_status.text = "当前启动模式不支持在线对战"
+
+# ---------------------------------------------------------------- match history
+
+func _on_show_history() -> void:
+	if not Auth.is_logged_in():
+		_auth_status.text = "请先登录"
+		return
+	_history_panel.visible = true
+	_history_status.text = "加载中…"
+	for c in _history_list.get_children():
+		c.queue_free()
+	_fetch_history()
+
+func _fetch_history() -> void:
+	var url := Settings.central_url + "/api/matches"
+	var headers := PackedStringArray([Auth.auth_header()])
+	var err := _history_http.request(url, headers, HTTPClient.METHOD_GET)
+	if err != OK:
+		_history_status.text = "网络错误"
+		return
+	var result: Array = await _history_http.request_completed
+	var rcode: int = result[0]
+	var http_code: int = result[1]
+	var body_bytes: PackedByteArray = result[3]
+	if rcode != HTTPRequest.RESULT_SUCCESS:
+		_history_status.text = "网络错误"
+		return
+	if http_code == 401:
+		_history_status.text = "登录已过期,请重新登录"
+		return
+	if http_code < 200 or http_code >= 300:
+		_history_status.text = "加载失败 (HTTP %d)" % http_code
+		return
+	var parsed = JSON.parse_string(body_bytes.get_string_from_utf8())
+	var matches: Array = []
+	if typeof(parsed) == TYPE_ARRAY:
+		matches = parsed
+	elif typeof(parsed) == TYPE_DICTIONARY and parsed.has("matches"):
+		matches = parsed["matches"]
+	_populate_history(matches)
+
+func _populate_history(matches: Array) -> void:
+	for c in _history_list.get_children():
+		c.queue_free()
+	if matches.is_empty():
+		_history_status.text = "暂无对战记录"
+		return
+	_history_status.text = "最近 %d 场" % matches.size()
+	for m in matches:
+		var d: Dictionary = m
+		var row := Label.new()
+		var mode := String(d.get("mode", "?"))
+		var status := String(d.get("status", "?"))
+		var created := String(d.get("created_at", ""))
+		var players = d.get("players", [])
+		var pcount := players.size() if typeof(players) == TYPE_ARRAY else 0
+		row.text = "• %s · %s · %s · %d 玩家 · id %s" % [mode, status, created, pcount, String(d.get("id", ""))]
+		row.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		row.custom_minimum_size = Vector2(520, 0)
+		_history_list.add_child(row)

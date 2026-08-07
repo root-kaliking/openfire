@@ -1,61 +1,68 @@
-// Package db wraps the pgx connection pool and runs the embedded
-// schema.sql on startup. All statements in schema.sql are idempotent
-// (CREATE TABLE/INDEX IF NOT EXISTS) so running it on every boot is safe.
+// Package db wraps the PostgreSQL connection pool (via lib/pq) and the
+// Redis client used for session/presence state.
 package db
 
 import (
-	"context"
-	_ "embed"
+	"database/sql"
 	"fmt"
+	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/lib/pq" // postgres driver registration
+	"github.com/redis/go-redis/v9"
 )
 
-//go:embed schema.sql
-var schemaSQL string
-
-// DB holds the Postgres connection pool.
+// DB holds the Postgres pool and Redis client.
 type DB struct {
-	Pool *pgxpool.Pool
+	PG    *sql.DB
+	Redis *redis.Client
 }
 
-// New creates a connection pool against the given DATABASE_URL and pings it.
-func New(ctx context.Context, databaseURL string) (*DB, error) {
-	cfg, err := pgxpool.ParseConfig(databaseURL)
+// New opens the Postgres pool and Redis client, pinging Postgres to
+// fail fast on misconfiguration.
+func New(databaseURL, redisURL string) (*DB, error) {
+	pg, err := sql.Open("postgres", databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse db url: %w", err)
+		return nil, fmt.Errorf("open postgres: %w", err)
 	}
-	cfg.MaxConns = 20
-	cfg.MinConns = 1
-	cfg.MaxConnLifetime = time.Hour
-	cfg.MaxConnIdleTime = 15 * time.Minute
+	pg.SetMaxOpenConns(20)
+	pg.SetMaxIdleConns(5)
+	pg.SetConnMaxLifetime(time.Hour)
+	if err := pg.Ping(); err != nil {
+		pg.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
 
-	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.NewWithConfig(pingCtx, cfg)
+	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
-		return nil, fmt.Errorf("connect db: %w", err)
+		pg.Close()
+		return nil, fmt.Errorf("parse redis url: %w", err)
 	}
-	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping db: %w", err)
-	}
-	return &DB{Pool: pool}, nil
+	rdb := redis.NewClient(opt)
+
+	return &DB{PG: pg, Redis: rdb}, nil
 }
 
-// Migrate executes schema.sql (idempotent). Safe to call on every boot.
-func (d *DB) Migrate(ctx context.Context) error {
-	if _, err := d.Pool.Exec(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
+// Migrate reads the SQL file at path and executes it. Statements are
+// idempotent (CREATE TABLE/INDEX IF NOT EXISTS) so it is safe to run on
+// every boot.
+func (d *DB) Migrate(path string) error {
+	sqlBytes, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read migration %s: %w", path, err)
+	}
+	if _, err := d.PG.Exec(string(sqlBytes)); err != nil {
+		return fmt.Errorf("apply migration: %w", err)
 	}
 	return nil
 }
 
-// Close releases the pool resources.
+// Close releases the Postgres pool and Redis client.
 func (d *DB) Close() {
-	if d.Pool != nil {
-		d.Pool.Close()
+	if d.PG != nil {
+		d.PG.Close()
+	}
+	if d.Redis != nil {
+		_ = d.Redis.Close()
 	}
 }
