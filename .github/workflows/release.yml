@@ -101,6 +101,17 @@ jobs:
           fi
           ls -lh "$HOME/.android/debug.keystore"
 
+      - name: Install Godot Android build template
+        run: |
+          set -euo pipefail
+          # The export templates zip contains android_source.zip; Godot's "Install Android Build Template"
+          # expands it to <project>/android/build so --export-release "Android" doesn't error out.
+          templates="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
+          mkdir -p android/build
+          unzip -q "$templates/android_source.zip" -d android/build
+          echo "Android build template installed, dir listing:"
+          ls android/build | head -20
+
       - name: Restore NobodyWho addon (optional)
         continue-on-error: true
         env:
@@ -288,6 +299,15 @@ jobs:
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
+
+      - name: Install Godot Android build template
+        run: |
+          set -euo pipefail
+          templates="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
+          mkdir -p android/build
+          unzip -q "$templates/android_source.zip" -d android/build
+          echo "Android build template installed, dir listing:"
+          ls android/build | head -20
 
       - name: Restore NobodyWho addon (optional)
         continue-on-error: true
