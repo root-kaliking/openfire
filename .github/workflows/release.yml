@@ -183,7 +183,9 @@ jobs:
           godot --headless --path . --export-release "Android" build/openfire.apk
 
           # --- 专用游戏服务器（Dedicated Server，Linux x86_64）---
+          # dedicated_server=true 模式下 embed_pck 可能不生效，额外导出独立 .pck 文件
           godot --headless --path . --export-release "Dedicated Server" build/openfire-server
+          godot --headless --path . --export-pack "Dedicated Server" build/openfire-server.pck
           chmod +x build/openfire-server
 
           # --- Go 中央服务器（Linux x86_64）---
@@ -203,8 +205,8 @@ jobs:
           # Android APK
           cp build/openfire.apk "dist/openfire-${V}-android-arm64-v8a.apk"
 
-          # 专用游戏服务器（Linux）
-          ( cd build && zip -j "../dist/openfire-${V}-dedicated-server-linux-x86_64.zip" openfire-server )
+          # 专用游戏服务器（Linux，含二进制 + .pck）
+          ( cd build && zip -j "../dist/openfire-${V}-dedicated-server-linux-x86_64.zip" openfire-server openfire-server.pck )
 
           # Go 中央服务器（Linux，含迁移脚本）
           mkdir -p central-pkg/server/migrations
@@ -392,7 +394,9 @@ jobs:
           godot --headless --path . --export-release "Android" build/openfire.apk
 
           # --- 专用游戏服务器（Dedicated Server，Linux x86_64）---
+          # dedicated_server=true 模式下 embed_pck 可能不生效，额外导出独立 .pck 文件
           godot --headless --path . --export-release "Dedicated Server" build/openfire-server
+          godot --headless --path . --export-pack "Dedicated Server" build/openfire-server.pck
           chmod +x build/openfire-server
 
           # --- Go 中央服务器（Linux x86_64）---
@@ -408,8 +412,8 @@ jobs:
           cp build/openfire-macos.zip "dist/openfire-macos.zip"
           cp build/openfire.apk "dist/openfire-android-arm64-v8a.apk"
 
-          # 专用游戏服务器（Linux）
-          ( cd build && zip -j "../dist/openfire-dedicated-server-linux-x86_64.zip" openfire-server )
+          # 专用游戏服务器（Linux，含二进制 + .pck）
+          ( cd build && zip -j "../dist/openfire-dedicated-server-linux-x86_64.zip" openfire-server openfire-server.pck )
 
           # Go 中央服务器（Linux，含迁移脚本）
           mkdir -p central-pkg/server/migrations
