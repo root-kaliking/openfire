@@ -64,12 +64,24 @@ func _ready() -> void:
 	if me:
 		me.dealt_damage.connect(func(_amt): sig[0] = true)
 		var wm = me.weapons
+		# Guarantee weapon_manager fires regardless of headless/camera timing:
+		# force is_local=true so the _process trigger path is always executed,
+		# and if no camera is attached yet (headless CI smoke) create a
+		# temporary Camera3D stub so _fire() raycasts have an origin.
+		wm.is_local = true
+		if wm.camera == null:
+			var stub_cam := Camera3D.new()
+			stub_cam.current = false
+			me.add_child(stub_cam)
+			stub_cam.global_position = me.global_position + Vector3.UP * 1.5
+			stub_cam.global_rotation = Vector3.ZERO
+			wm.camera = stub_cam
 		var wid = wm.loadout[wm.current_index] if not wm.loadout.is_empty() else ""
 		var before: int = wm.ammo.get(wid, {}).get("mag", -1)
 		# Firing runs in _process; hold the trigger over a generous window so it ticks even under
 		# CI load (0.6s was too short there and flaked — green locally, red on a loaded runner).
 		wm.set_trigger(true)
-		await get_tree().create_timer(2.0).timeout
+		await get_tree().create_timer(3.5).timeout
 		wm.set_trigger(false)
 		var after: int = wm.ammo.get(wid, {}).get("mag", -1)
 		fired_ok = before > 0 and after < before
