@@ -201,7 +201,7 @@ func (q *Queue) createMatch(mode string, players []entry) {
 		return
 	}
 
-	port, err := q.gsMgr.StartMatch(matchID)
+	port, err := q.gsMgr.StartMatch(matchID, mode)
 	if err != nil {
 		log.Printf("matchmaking: start gs for %s: %v", matchID, err)
 		q.markAbandoned(matchID)

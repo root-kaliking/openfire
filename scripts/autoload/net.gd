@@ -12,7 +12,9 @@ signal server_disconnected
 signal match_started
 
 const DEFAULT_PORT := 27015
-const MAX_PLAYERS := 8
+# 16 supports battle_royale (the largest configured mode); smaller modes
+# (deathmatch/domination/team_dm=8, coop/adventure=4) just don't fill the slots.
+const MAX_PLAYERS := 16
 
 var peer: ENetMultiplayerPeer = null
 # peer_id -> { "name": String }
@@ -25,9 +27,9 @@ func _ready() -> void:
 	multiplayer.connection_failed.connect(_on_connection_failed)
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
 
-func host_game(port: int = DEFAULT_PORT) -> bool:
+func host_game(port: int = DEFAULT_PORT, max_players: int = MAX_PLAYERS) -> bool:
 	peer = ENetMultiplayerPeer.new()
-	var err := peer.create_server(port, MAX_PLAYERS)
+	var err := peer.create_server(port, max_players)
 	if err != OK:
 		push_error("Net: failed to create server on port %d (err %d)" % [port, err])
 		return false

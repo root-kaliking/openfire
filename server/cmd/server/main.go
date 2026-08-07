@@ -60,14 +60,17 @@ func main() {
 		r.Post("/login", authH.Login)
 	})
 
-	lobbyH := handlers.NewLobbyHandler(hub)
+	lobbyH := handlers.NewLobbyHandler(hub, cfg.JWTSecret)
 	mmH := handlers.NewMatchmakingHandler(queue)
 	matchesH := handlers.NewMatchesHandler(database.PG)
 
-	// Authenticated player routes.
+	// WS lobby authenticates via ?token=<jwt> query param (browser/Godot
+	// WebSocket clients cannot set Authorization headers during upgrade).
+	r.Get("/api/ws", lobbyH.ServeWS)
+
+	// Authenticated player routes (header-based JWT).
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(cfg.JWTSecret))
-		r.Get("/api/ws", lobbyH.ServeWS)
 		r.Post("/api/match/queue", mmH.Queue)
 		r.Post("/api/match/cancel", mmH.Cancel)
 		r.Get("/api/matches", matchesH.ListMatches)

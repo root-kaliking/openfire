@@ -51,13 +51,14 @@ func New(db *sql.DB, godotBin, projectPath, centralURL, internalToken string, po
 
 // StartMatch allocates a free port and launches a Godot headless
 // dedicated-server process for the given match id. It returns the
-// allocated port.
-func (m *Manager) StartMatch(matchID string) (int, error) {
+// allocated port. mode is forwarded to the GS via OPENFIRE_GS_MODE so it can
+// configure Game.config before starting the match.
+func (m *Manager) StartMatch(matchID string, mode string) (int, error) {
 	port, err := m.allocatePort()
 	if err != nil {
 		return 0, err
 	}
-	if err := m.launch(matchID, port); err != nil {
+	if err := m.launch(matchID, port, mode); err != nil {
 		m.releasePort(port)
 		return 0, err
 	}
@@ -92,7 +93,7 @@ func (m *Manager) releasePort(p int) {
 	delete(m.usedPorts, p)
 }
 
-func (m *Manager) launch(matchID string, port int) error {
+func (m *Manager) launch(matchID string, port int, mode string) error {
 	if err := os.MkdirAll(m.logsDir, 0o755); err != nil {
 		return fmt.Errorf("create logs dir: %w", err)
 	}
@@ -111,6 +112,7 @@ func (m *Manager) launch(matchID string, port int) error {
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("OPENFIRE_GS_PORT=%d", port),
 		fmt.Sprintf("OPENFIRE_GS_MATCH_ID=%s", matchID),
+		fmt.Sprintf("OPENFIRE_GS_MODE=%s", mode),
 		fmt.Sprintf("OPENFIRE_INTERNAL_TOKEN=%s", m.internalToken),
 		fmt.Sprintf("OPENFIRE_CENTRAL_URL=%s", m.centralURL),
 	)
