@@ -63,6 +63,9 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          # GITHUB_PATH only applies to *subsequent* steps, so also export PATH
+          # here so sdkmanager is usable within this same step.
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
@@ -73,8 +76,10 @@ jobs:
             "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
           unzip -q cmdline-tools.zip
           mv cmdline-tools latest
-          # Accept licenses and install required SDK packages
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          # Accept licenses and install required SDK packages.
+          # Redirect yes's stderr too, to silence the harmless "Broken pipe"
+          # warning that appears when sdkmanager closes the pipe early.
+          yes 2>/dev/null | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
