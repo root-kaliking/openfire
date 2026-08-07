@@ -1,60 +1,107 @@
-// Package config loads all central-server settings from environment variables.
+// Package config centralizes all runtime configuration sourced from
+// environment variables with developer-friendly defaults so the server
+// can be started with `go run .` without any extra setup.
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
-	"time"
+	"strings"
 )
 
-// Config holds all runtime configuration for the central server.
+// Config is the resolved configuration for the central server.
 type Config struct {
-	DatabaseURL            string
-	JWTSecret              string
-	JWTTTL                 time.Duration
-	ListenAddr             string
-	InternalToken          string
-	GameserverBinary       string
-	GameserverPortMin      int
-	GameserverPortMax      int
-	GameserverMaxPlayers   int
-	GameserverStartTimeout time.Duration
-	GameserverMaxDuration  time.Duration
-	PublicGSIP             string
-	CentralURL             string
+	HTTPAddr string
+
+	DatabaseURL    string
+	RedisAddr      string
+	RedisPassword  string
+	RedisDB        int
+	RunMigrations  bool
+
+	JWTSecret      string
+	JWTTTLMinutes  int
+
+	InternalToken  string
+
+	GodotBinaryPath string
+	GodotProjectPath string
+	GSListenHost    string
+	GSPortMin       int
+	GSPortMax       int
+
+	MatchIntervalMS int
+	DMMinPlayers    int
+	DMMaxPlayers    int
+
+	LobbyBroadcastMS int
+	GSHeartbeatTimeoutSec int
 }
 
-// Load reads configuration from environment variables, applying MVP defaults.
-func Load() Config {
-	c := Config{
-		DatabaseURL:            getenv("DATABASE_URL", "postgres://openfire:openfire@localhost:5432/openfire?sslmode=disable"),
-		JWTSecret:              getenv("JWT_SECRET", "change-me"),
-		ListenAddr:             getenv("LISTEN_ADDR", ":8080"),
-		InternalToken:          getenv("INTERNAL_TOKEN", "dev-internal-token-xxx"),
-		GameserverBinary:       getenv("GAMESERVER_BINARY", "/workspace/build/openfire.x86_64"),
-		GameserverPortMin:      getenvInt("GAMESERVER_PORT_MIN", 27015),
-		GameserverPortMax:      getenvInt("GAMESERVER_PORT_MAX", 27040),
-		GameserverMaxPlayers:   getenvInt("GAMESERVER_MAX_PLAYERS", 8),
-		GameserverStartTimeout: time.Duration(getenvInt("GAMESERVER_START_TIMEOUT", 30)) * time.Second,
-		GameserverMaxDuration:  time.Duration(getenvInt("GAMESERVER_MAX_DURATION", 30)) * time.Minute,
-		PublicGSIP:             getenv("PUBLIC_GS_IP", "127.0.0.1"),
-		CentralURL:             getenv("CENTRAL_URL", "http://127.0.0.1:8080"),
+// Load reads configuration from environment variables, applying safe
+// development defaults when values are missing.
+func Load() (*Config, error) {
+	cfg := &Config{
+		HTTPAddr:           getenv("OPENFIRE_HTTP_ADDR", ":8080"),
+		DatabaseURL:        getenv("OPENFIRE_DATABASE_URL", "postgres://openfire:openfire@localhost:5432/openfire?sslmode=disable"),
+		RedisAddr:          getenv("OPENFIRE_REDIS_ADDR", "localhost:6379"),
+		RedisPassword:      getenv("OPENFIRE_REDIS_PASSWORD", ""),
+		RedisDB:            getenvInt("OPENFIRE_REDIS_DB", 0),
+		RunMigrations:      getenvBool("OPENFIRE_RUN_MIGRATIONS", true),
+		JWTSecret:          getenv("OPENFIRE_JWT_SECRET", "dev-jwt-secret-change-me"),
+		JWTTTLMinutes:      getenvInt("OPENFIRE_JWT_TTL_MINUTES", 1440),
+		InternalToken:      getenv("OPENFIRE_INTERNAL_TOKEN", "dev-internal-token"),
+		GodotBinaryPath:    getenv("OPENFIRE_GODOT_BINARY", "godot"),
+		GodotProjectPath:   getenv("OPENFIRE_GODOT_PROJECT_PATH", "/workspace"),
+		GSListenHost:       getenv("OPENFIRE_GS_HOST", "127.0.0.1"),
+		GSPortMin:          getenvInt("OPENFIRE_GS_PORT_MIN", 27100),
+		GSPortMax:          getenvInt("OPENFIRE_GS_PORT_MAX", 27200),
+		MatchIntervalMS:    getenvInt("OPENFIRE_MATCH_INTERVAL_MS", 1000),
+		DMMinPlayers:       getenvInt("OPENFIRE_DM_MIN_PLAYERS", 4),
+		DMMaxPlayers:       getenvInt("OPENFIRE_DM_MAX_PLAYERS", 8),
+		LobbyBroadcastMS:   getenvInt("OPENFIRE_LOBBY_BROADCAST_MS", 2000),
+		GSHeartbeatTimeoutSec: getenvInt("OPENFIRE_GS_HEARTBEAT_TIMEOUT_SEC", 15),
 	}
-	c.JWTTTL = time.Duration(getenvInt("JWT_TTL_HOURS", 168)) * time.Hour
-	return c
+
+	if cfg.GSPortMax < cfg.GSPortMin {
+		return nil, fmt.Errorf("OPENFIRE_GS_PORT_MAX (%d) < PORT_MIN (%d)", cfg.GSPortMax, cfg.GSPortMin)
+	}
+	if cfg.DMMinPlayers < 2 {
+		return nil, fmt.Errorf("OPENFIRE_DM_MIN_PLAYERS must be >= 2")
+	}
+	if cfg.DMMaxPlayers < cfg.DMMinPlayers {
+		return nil, fmt.Errorf("OPENFIRE_DM_MAX_PLAYERS (%d) < MIN (%d)", cfg.DMMaxPlayers, cfg.DMMinPlayers)
+	}
+	if strings.TrimSpace(cfg.JWTSecret) == "" {
+		return nil, fmt.Errorf("OPENFIRE_JWT_SECRET must not be empty")
+	}
+	if strings.TrimSpace(cfg.InternalToken) == "" {
+		return nil, fmt.Errorf("OPENFIRE_INTERNAL_TOKEN must not be empty")
+	}
+	return cfg, nil
 }
 
 func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
 	}
 	return def
 }
 
 func getenvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return def

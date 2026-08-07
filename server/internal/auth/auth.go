@@ -1,194 +1,162 @@
-// Package auth implements user registration, login, JWT signing/verification
-// and the HTTP middleware that protects authenticated routes.
+// Package auth implements user registration/login, JWT (HS256) issuance
+// and verification, and bcrypt password hashing. It is transport-agnostic;
+// HTTP wiring lives in internal/api.
 package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
+
+	"openfire-server/internal/models"
 )
 
-// Sentinel errors returned by the service.
-var (
-	ErrUsernameTaken       = errors.New("username taken")
-	ErrInvalidCredentials  = errors.New("invalid credentials")
-	ErrInvalidUsername     = errors.New("username must be 3-32 characters")
-	ErrInvalidPassword     = errors.New("password must be 6-128 characters")
-)
-
-// Service handles auth persistence and JWT operations.
+// Service owns the auth state (DB pool + signing secret + token TTL).
 type Service struct {
-	Pool   *pgxpool.Pool
-	Secret []byte
-	TTL    time.Duration
+	pool      *pgxpool.Pool
+	secret    []byte
+	ttl       time.Duration
 }
 
-// Claims is the JWT payload.
+// New builds a Service. ttlMinutes controls JWT expiry.
+func New(pool *pgxpool.Pool, secret string, ttlMinutes int) *Service {
+	return &Service{
+		pool:   pool,
+		secret: []byte(secret),
+		ttl:    time.Duration(ttlMinutes) * time.Minute,
+	}
+}
+
+// Claims is the JWT payload. Subject = user UUID.
 type Claims struct {
-	UserID   int64  `json:"uid"`
-	Username string `json:"usr"`
+	Username string `json:"username"`
 	jwt.RegisteredClaims
 }
 
-type ctxKey string
+type ctxKey struct{}
 
-const (
-	CtxUserID   ctxKey = "uid"
-	CtxUsername ctxKey = "usr"
-)
+// ErrInvalidToken is returned by Verify for any malformed/expired token.
+var ErrInvalidToken = errors.New("invalid token")
 
-// New constructs an auth Service.
-func New(pool *pgxpool.Pool, secret string, ttl time.Duration) *Service {
-	return &Service{Pool: pool, Secret: []byte(secret), TTL: ttl}
-}
-
-// ValidateCredentials checks username/password length constraints.
-func ValidateCredentials(username, password string) error {
-	if len(username) < 3 || len(username) > 32 {
-		return ErrInvalidUsername
+// Register creates a user. Username is trimmed and lower-cased for the
+// uniqueness check while the original casing is preserved for display.
+func (s *Service) Register(ctx context.Context, username, password string) (models.AuthResponse, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || len(username) > 32 {
+		return models.AuthResponse{}, errors.New("username must be 1-32 chars")
 	}
 	if len(password) < 6 || len(password) > 128 {
-		return ErrInvalidPassword
+		return models.AuthResponse{}, errors.New("password must be 6-128 chars")
 	}
-	return nil
-}
 
-// Register creates a new user (and its stats row) and returns a fresh JWT.
-func (s *Service) Register(ctx context.Context, username, password string) (token string, userID int64, exp int64, err error) {
-	if err := ValidateCredentials(username, password); err != nil {
-		return "", 0, 0, err
-	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return "", 0, 0, err
+		return models.AuthResponse{}, fmt.Errorf("hash password: %w", err)
 	}
-	tx, err := s.Pool.Begin(ctx)
-	if err != nil {
-		return "", 0, 0, err
-	}
-	defer tx.Rollback(ctx)
 
-	if err := tx.QueryRow(ctx,
-		"INSERT INTO users(username, password_hash) VALUES($1,$2) RETURNING id",
-		username, string(hash)).Scan(&userID); err != nil {
+	id := uuid.NewString()
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO users (id, username, password_hash) VALUES ($1, $2, $3)`,
+		id, username, string(hash))
+	if err != nil {
 		if isUniqueViolation(err) {
-			return "", 0, 0, ErrUsernameTaken
+			return models.AuthResponse{}, errors.New("username already taken")
 		}
-		return "", 0, 0, err
+		return models.AuthResponse{}, fmt.Errorf("insert user: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "INSERT INTO user_stats(user_id) VALUES($1)", userID); err != nil {
-		return "", 0, 0, err
+
+	token, err := s.sign(id, username)
+	if err != nil {
+		return models.AuthResponse{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", 0, 0, err
-	}
-	return s.sign(userID, username)
+	return models.AuthResponse{Token: token, User: s.publicUser(id, username, time.Now().UTC())}, nil
 }
 
 // Login verifies credentials and returns a fresh JWT.
-func (s *Service) Login(ctx context.Context, username, password string) (token string, userID int64, exp int64, err error) {
-	var hash string
-	err = s.Pool.QueryRow(ctx,
-		"SELECT id, password_hash FROM users WHERE username=$1", username).Scan(&userID, &hash)
+func (s *Service) Login(ctx context.Context, username, password string) (models.AuthResponse, error) {
+	username = strings.TrimSpace(username)
+	var u models.User
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, username, password_hash, created_at FROM users WHERE username = $1`,
+		username).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", 0, 0, ErrInvalidCredentials
+			return models.AuthResponse{}, errors.New("invalid credentials")
 		}
-		return "", 0, 0, err
+		return models.AuthResponse{}, fmt.Errorf("query user: %w", err)
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-		return "", 0, 0, ErrInvalidCredentials
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+		return models.AuthResponse{}, errors.New("invalid credentials")
 	}
-	return s.sign(userID, username)
+
+	token, err := s.sign(u.ID, u.Username)
+	if err != nil {
+		return models.AuthResponse{}, err
+	}
+	return models.AuthResponse{Token: token, User: s.publicUser(u.ID, u.Username, u.CreatedAt)}, nil
 }
 
-func (s *Service) sign(userID int64, username string) (string, int64, error) {
-	now := time.Now()
-	exp := now.Add(s.TTL)
+func (s *Service) sign(userID, username string) (string, error) {
+	now := time.Now().UTC()
 	claims := Claims{
-		UserID:   userID,
 		Username: username,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(exp),
+			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),
-			Subject:   username,
+			ExpiresAt: jwt.NewNumericDate(now.Add(s.ttl)),
+			Issuer:    "openfire",
 		},
 	}
-	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenStr, err := t.SignedString(s.Secret)
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := tok.SignedString(s.secret)
 	if err != nil {
-		return "", 0, err
+		return "", fmt.Errorf("sign jwt: %w", err)
 	}
-	return tokenStr, exp.Unix(), nil
+	return signed, nil
 }
 
-// Verify parses and validates a JWT, returning its claims.
+// Verify parses and validates a JWT, returning the claims.
 func (s *Service) Verify(tokenStr string) (*Claims, error) {
 	claims := &Claims{}
 	_, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			return nil, ErrInvalidToken
 		}
-		return s.Secret, nil
+		return s.secret, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, ErrInvalidToken
 	}
 	return claims, nil
 }
 
-// Middleware protects HTTP routes with a Bearer JWT check.
-func (s *Service) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authz := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authz, "Bearer ") {
-			writeJSONError(w, http.StatusUnauthorized, "missing or invalid authorization header")
-			return
-		}
-		tokenStr := strings.TrimPrefix(authz, "Bearer ")
-		claims, err := s.Verify(tokenStr)
-		if err != nil {
-			writeJSONError(w, http.StatusUnauthorized, "invalid token")
-			return
-		}
-		ctx := context.WithValue(r.Context(), CtxUserID, claims.UserID)
-		ctx = context.WithValue(ctx, CtxUsername, claims.Username)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+// ContextWithUser stores the verified user id/username in ctx.
+func ContextWithUser(ctx context.Context, userID, username string) context.Context {
+	return context.WithValue(ctx, ctxKey{}, [2]string{userID, username})
 }
 
-// UserIDFromCtx extracts the authenticated user id from a request context.
-func UserIDFromCtx(ctx context.Context) (int64, bool) {
-	v, ok := ctx.Value(CtxUserID).(int64)
-	return v, ok
-}
-
-// UsernameFromCtx extracts the authenticated username from a request context.
-func UsernameFromCtx(ctx context.Context) (string, bool) {
-	v, ok := ctx.Value(CtxUsername).(string)
-	return v, ok
-}
-
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23505"
+// UserFromContext returns (userID, username, ok).
+func UserFromContext(ctx context.Context) (string, string, bool) {
+	v, ok := ctx.Value(ctxKey{}).([2]string)
+	if !ok {
+		return "", "", false
 	}
-	return false
+	return v[0], v[1], true
 }
 
-func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+func (s *Service) publicUser(id, username string, createdAt time.Time) models.UserInfo {
+	return models.UserInfo{ID: id, Username: username, CreatedAt: createdAt}
+}
+
+// isUniqueViolation detects a Postgres unique constraint error.
+func isUniqueViolation(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "23505")
 }
