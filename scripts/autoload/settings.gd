@@ -37,6 +37,15 @@ var comfyui_model_file: String = "v1-5-pruned-emaonly.safetensors"
 # comfyui/ on first use ("download game, play"). Defaults to the latest GitHub Release asset
 # that the release workflow attaches (see .github/workflows/release.yml + make_comfyui_bundle.sh).
 var comfyui_bundle_url: String = "https://github.com/rokasjasonas/openfire/releases/latest/download/comfyui-bundle.zip"
+# --- central server (account / lobby / matchmaking) ------------------------------------------
+# The authoritative backend for the dedicated-server mode (account, lobby, matchmaking,
+# match results). Default points at a locally-running instance for development; override
+# via settings.cfg [central] url / ws_url. ws_url defaults to the ws:// counterpart of url.
+var central_url: String = "http://127.0.0.1:8080"
+var central_ws_url: String = "ws://127.0.0.1:8080/api/ws"
+# Internal shared secret used by Game Servers to call central's /internal/* endpoints.
+# Only relevant when running as a dedicated server (read from OPENFIRE_INTERNAL_TOKEN env).
+var central_internal_token: String = ""
 # Expected download size in bytes — the % is computed against this because HuggingFace's
 # LFS redirects make the HTTP Content-Length unreliable. ~4.27 GB for SD 1.5 emaonly.
 var comfyui_model_size: int = 4265146304
@@ -72,6 +81,8 @@ func load_settings() -> void:
 		comfyui_model_file = String(cfg.get_value("comfyui", "model_file", comfyui_model_file))
 		comfyui_model_size = int(cfg.get_value("comfyui", "model_size", comfyui_model_size))
 		comfyui_bundle_url = String(cfg.get_value("comfyui", "bundle_url", comfyui_bundle_url))
+		central_url = String(cfg.get_value("central", "url", central_url))
+		central_ws_url = String(cfg.get_value("central", "ws_url", central_ws_url))
 
 func save() -> void:
 	var cfg := ConfigFile.new()
@@ -94,6 +105,8 @@ func save() -> void:
 	cfg.set_value("comfyui", "model_file", comfyui_model_file)
 	cfg.set_value("comfyui", "model_size", comfyui_model_size)
 	cfg.set_value("comfyui", "bundle_url", comfyui_bundle_url)
+	cfg.set_value("central", "url", central_url)
+	cfg.set_value("central", "ws_url", central_ws_url)
 	cfg.save(PATH)
 
 ## Apply settings that affect global systems (audio bus). Per-player look/FOV are

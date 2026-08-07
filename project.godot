@@ -27,6 +27,9 @@ ComfyUI="*res://scripts/autoload/comfyui.gd"
 Audio="*res://scripts/autoload/audio.gd"
 Music="*res://scripts/autoload/music.gd"
 Settings="*res://scripts/autoload/settings.gd"
+Auth="*res://scripts/autoload/auth.gd"
+Lobby="*res://scripts/autoload/lobby.gd"
+BootChecker="*res://scripts/autoload/boot_checker.gd"
 
 [display]
 
