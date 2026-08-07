@@ -47,7 +47,7 @@ func main() {
 	// messages to the queue; the queue pushes messages through the hub),
 	// so construct the hub first with a nil handler and wire it after.
 	hub := lobby.NewHub(nil)
-	gsMgr := gs.New(database.PG, cfg.GodotBin, "/workspace", cfg.CentralURL, cfg.InternalToken, cfg.GSHost, cfg.GSPortMin, cfg.GSPortMax, "logs")
+	gsMgr := gs.New(database.PG, cfg.GodotBin, "/workspace", cfg.CentralURL, cfg.InternalToken, cfg.GSPortMin, cfg.GSPortMax, "logs")
 	queue := matchmaking.NewQueue(hub, database.PG, gsMgr, cfg.GSHost, cfg.MatchmakingTimeout)
 	hub.SetHandler(queue)
 

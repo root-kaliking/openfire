@@ -52,6 +52,17 @@ func _ready() -> void:
 	_http = HTTPRequest.new()
 	add_child(_http)
 
+	# Wait one frame before booting the ENet server. BootChecker redirected to
+	# this scene via change_scene.call_deferred; creating the ENet host during
+	# that same frame fails with ERR_CANT_CREATE. process_frame lets the tree
+	# settle and guarantees we are still the active scene.
+	await get_tree().process_frame
+	_boot_server()
+
+func _boot_server() -> void:
+	# Guard against the scene being swapped out while we were awaiting.
+	if not is_inside_tree():
+		return
 	# 2) Open the ENet server. host_game() makes us peer 1 (the authority).
 	if not Net.host_game(BootChecker.gs_port):
 		push_error("[GS] failed to bind port %d — exiting" % BootChecker.gs_port)

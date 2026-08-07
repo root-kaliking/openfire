@@ -155,7 +155,7 @@ func _ready() -> void:
 	_refresh_auth_ui()
 	# Auto-attach the lobby WebSocket if we have a saved session, so the player can
 	# queue the moment they click PLAY ONLINE.
-	if Auth.is_logged_in() and not Lobby.is_connected():
+	if Auth.is_logged_in() and not Lobby.is_lobby_connected():
 		Lobby.connect_lobby()
 
 	name_edit.text = Game.player_name
@@ -885,7 +885,7 @@ func _on_register_pressed() -> void:
 	_password_edit.text = ""
 
 func _on_logout_pressed() -> void:
-	if Lobby.is_connected():
+	if Lobby.is_lobby_connected():
 		Lobby.disconnect_lobby()
 	Auth.logout()
 
@@ -893,7 +893,7 @@ func _on_auth_logged_in(_user_id: String, _username: String) -> void:
 	_login_btn.disabled = false
 	_register_btn.disabled = false
 	_refresh_auth_ui()
-	if not Lobby.is_connected():
+	if not Lobby.is_lobby_connected():
 		Lobby.connect_lobby()
 
 func _on_auth_logged_out() -> void:
@@ -968,7 +968,7 @@ func _on_play_online() -> void:
 	if _queuing:
 		Lobby.cancel_match()
 		return
-	if not Lobby.is_connected():
+	if not Lobby.is_lobby_connected():
 		_pending_queue = true
 		_match_status.text = "正在连接大厅…"
 		_match_status.modulate = Color(0.7, 0.85, 1.0)
@@ -1054,7 +1054,7 @@ func _populate_history(matches: Array) -> void:
 		var status := String(d.get("status", "?"))
 		var created := String(d.get("created_at", ""))
 		var players = d.get("players", [])
-		var pcount := players.size() if typeof(players) == TYPE_ARRAY else 0
+		var pcount: int = players.size() if typeof(players) == TYPE_ARRAY else 0
 		row.text = "• %s · %s · %s · %d 玩家 · id %s" % [mode, status, created, pcount, String(d.get("id", ""))]
 		row.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		row.custom_minimum_size = Vector2(520, 0)

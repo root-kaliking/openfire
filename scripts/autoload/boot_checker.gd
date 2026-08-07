@@ -32,7 +32,10 @@ func _ready() -> void:
 		internal_token = OS.get_environment("OPENFIRE_INTERNAL_TOKEN") if OS.get_environment("OPENFIRE_INTERNAL_TOKEN") != "" else Settings.central_internal_token
 		print("[BootChecker] DEDICATED_SERVER match=%s port=%d mode=%s" % [gs_match_id, gs_port, gs_mode])
 		# Skip the menu entirely; dedicated_server.gd takes over from here.
-		get_tree().change_scene_to_file("res://scenes/dedicated_server.tscn")
+		# Use call_deferred because _ready() runs while the SceneTree is still
+		# building (autoloads load before the main scene); a direct change_scene
+		# here triggers "Parent node is busy adding/removing children".
+		get_tree().change_scene_to_file.call_deferred("res://scenes/dedicated_server.tscn")
 	else:
 		mode = Mode.CLIENT
 		print("[BootChecker] CLIENT mode")

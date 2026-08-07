@@ -104,7 +104,7 @@ func disconnect_lobby() -> void:
 	if was:
 		disconnected.emit("manual")
 
-func is_connected() -> bool:
+func is_lobby_connected() -> bool:
 	return _connected
 
 func queue_match(mode: String) -> void:
