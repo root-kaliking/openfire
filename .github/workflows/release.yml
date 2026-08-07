@@ -101,16 +101,22 @@ jobs:
           fi
           ls -lh "$HOME/.android/debug.keystore"
 
-      - name: Install Godot Android build template
+      - name: Configure Android export for CI (prebuilt APK template)
         run: |
           set -euo pipefail
-          # The export templates zip contains android_source.zip; Godot's "Install Android Build Template"
-          # expands it to <project>/android/build so --export-release "Android" doesn't error out.
-          templates="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
-          mkdir -p android/build
-          unzip -q "$templates/android_source.zip" -d android/build
-          echo "Android build template installed, dir listing:"
-          ls android/build | head -20
+          # gradle_build=true requires android/build/ + version marker installed by Editor.
+          # In CI we switch to prebuilt APK template mode: zero-config, ships straight
+          # from the export templates tpz, no Gradle wrapper runs.
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("export_presets.cfg")
+          t = p.read_text()
+          t = t.replace('gradle_build/use_gradle_build=true',
+                        'gradle_build/use_gradle_build=false')
+          p.write_text(t)
+          print("-> gradle_build/use_gradle_build=false")
+          PY
+          grep 'gradle_build/use_gradle_build' export_presets.cfg
 
       - name: Restore NobodyWho addon (optional)
         continue-on-error: true
@@ -300,14 +306,22 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Install Godot Android build template
+      - name: Configure Android export for CI (prebuilt APK template)
         run: |
           set -euo pipefail
-          templates="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
-          mkdir -p android/build
-          unzip -q "$templates/android_source.zip" -d android/build
-          echo "Android build template installed, dir listing:"
-          ls android/build | head -20
+          # gradle_build=true requires android/build/ + version marker installed by Editor.
+          # In CI we switch to prebuilt APK template mode: zero-config, ships straight
+          # from the export templates tpz, no Gradle wrapper runs.
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("export_presets.cfg")
+          t = p.read_text()
+          t = t.replace('gradle_build/use_gradle_build=true',
+                        'gradle_build/use_gradle_build=false')
+          p.write_text(t)
+          print("-> gradle_build/use_gradle_build=false")
+          PY
+          grep 'gradle_build/use_gradle_build' export_presets.cfg
 
       - name: Restore NobodyWho addon (optional)
         continue-on-error: true
